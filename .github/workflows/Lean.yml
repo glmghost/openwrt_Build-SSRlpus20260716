@@ -14,6 +14,10 @@ on:
         description: 'ssh'
         required: false
         default: 'false'
+      config_file:
+        description: 'Custom config file name (e.g., x86_64.config)'
+        required: false
+        default: ''
 
 env:
   UPLOAD_BIN_DIR: false
@@ -104,11 +108,46 @@ jobs:
 
     - name: Defconfig ${{matrix.target}}
       env:
-        CONFIG_FILE: '${{matrix.target}}.config'
+        # 优先使用 workflow_dispatch 输入的 config_file，否则使用矩阵目标名
+        CONFIG_FILE_INPUT: ${{ github.event.inputs.config_file }}
+        DEFAULT_CONFIG: '${{matrix.target}}.config'
       run: |
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x ./customize.sh && ./customize.sh
         cd openwrt
+        
+        # 确定使用的配置文件名
+        FINAL_CONFIG=""
+        if [ -n "$CONFIG_FILE_INPUT" ]; then
+          # 如果用户指定了文件名，检查仓库根目录是否有该文件
+          if [ -f "../$CONFIG_FILE_INPUT" ]; then
+            FINAL_CONFIG="$CONFIG_FILE_INPUT"
+            echo "Using custom config from input: $FINAL_CONFIG"
+          else
+            echo "Warning: Specified config file $CONFIG_FILE_INPUT not found in root. Falling back to default."
+          fi
+        fi
+        
+        # 如果没找到自定义的，尝试使用默认的 Matrix Target config
+        if [ -z "$FINAL_CONFIG" ]; then
+          if [ -f "../$DEFAULT_CONFIG" ]; then
+            FINAL_CONFIG="$DEFAULT_CONFIG"
+            echo "Using default config: $FINAL_CONFIG"
+          else
+            echo "Warning: No config file found ($DEFAULT_CONFIG). Using default make defconfig later."
+          fi
+        fi
+
+        # 移动配置文件到 openwrt/.config
+        if [ -n "$FINAL_CONFIG" ] && [ -f "../$FINAL_CONFIG" ]; then
+          cp -f "../$FINAL_CONFIG" .config
+          echo "Config file loaded successfully."
+        else
+          # 如果没有配置文件，创建一个空的或者让后续步骤处理
+          touch .config
+          echo "No specific config file found, starting with empty/default config."
+        fi
+
+        chmod +x ../customize.sh && ../customize.sh
+        
         rm -rf feeds/packages/lang/golang
         git clone https://github.com/kenzok8/golang -b 1.26 feeds/packages/lang/golang
         rm -rf feeds/luci/applications/luci-app-openclash
@@ -120,8 +159,10 @@ jobs:
         ./scripts/feeds update -a 
         sed -i 's#GO_PKG_TARGET_VARS.*# #g' feeds/packages/utils/v2dat/Makefile 
         ./scripts/feeds install -a
-        cp -f feeds/smpackage/.github/diy/${{matrix.target}}.config .config && make defconfig
-        #sed -i 's/CONFIG_BINUTILS_VERSION="2.42"/CONFIG_BINUTILS_VERSION="2.43.1"/' .config
+        
+        # 再次确保 .config 存在并执行 defconfig
+        # 如果之前复制了配置文件，这里会基于该配置进行依赖解析
+        make defconfig
         
     - name: Download package
       working-directory: ./openwrt
@@ -171,7 +212,8 @@ jobs:
       run: |
         mkdir firmware
         mv -f openwrt/bin/targets/*/*/{*combined*,*sysupgrade*} ./firmware/ 2>/dev/null || true
-        cp openwrt/.config ./firmware/${{matrix.target}}.config 2>/dev/null || true
+        # 将使用的配置文件也打包进去，方便追溯
+        cp openwrt/.config ./firmware/${{matrix.target}}_used.config 2>/dev/null || true
         cp openwrt/build_dir/target-*/linux-*/linux-*/.config ./firmware/${{matrix.target}}_kernel.config 2>/dev/null || true
         cd firmware
         echo "v${{ env.date2 }}" > version.txt
@@ -305,4 +347,3 @@ jobs:
         delete_tags: true
       env:
         GITHUB_TOKEN: ${{ secrets.REPO_TOKEN }}
-        
