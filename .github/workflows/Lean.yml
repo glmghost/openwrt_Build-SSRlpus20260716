@@ -117,7 +117,6 @@ jobs:
         # 确定使用的配置文件名
         FINAL_CONFIG=""
         if [ -n "$CONFIG_FILE_INPUT" ]; then
-          # 如果用户指定了文件名，检查仓库根目录是否有该文件
           if [ -f "../$CONFIG_FILE_INPUT" ]; then
             FINAL_CONFIG="$CONFIG_FILE_INPUT"
             echo "Using custom config from input: $FINAL_CONFIG"
@@ -126,7 +125,6 @@ jobs:
           fi
         fi
         
-        # 如果没找到自定义的，尝试使用默认的 Matrix Target config
         if [ -z "$FINAL_CONFIG" ]; then
           if [ -f "../$DEFAULT_CONFIG" ]; then
             FINAL_CONFIG="$DEFAULT_CONFIG"
@@ -141,28 +139,66 @@ jobs:
           cp -f "../$FINAL_CONFIG" .config
           echo "Config file loaded successfully."
         else
-          # 如果没有配置文件，创建一个空的或者让后续步骤处理
           touch .config
           echo "No specific config file found, starting with empty/default config."
         fi
 
-        chmod +x ../customize.sh && ../customize.sh
+        # --- 核心修复部分开始 ---
         
+        # 1. 替换 Golang 版本 (保持原逻辑)
         rm -rf feeds/packages/lang/golang
         git clone https://github.com/kenzok8/golang -b 1.26 feeds/packages/lang/golang
+        
+        # 2. 移除自带 OpenClash (保持原逻辑)
         rm -rf feeds/luci/applications/luci-app-openclash
-        cp -f feeds/smpackage/.github/diy/default-settings package/lean/default-settings/files/zzz-default-settings
-        cp -f feeds/smpackage/.github/diy/banner package/base-files/files/etc/banner
-        #cp -f feeds/smpackage/.github/diy/index_x86.htm package/lean/autocore/files/x86/index.htm
+        
+        # 3. 应用自定义设置和 Banner (保持原逻辑，但增加存在性检查)
+        if [ -f "feeds/smpackage/.github/diy/default-settings" ]; then
+            mkdir -p package/lean/default-settings/files
+            cp -f feeds/smpackage/.github/diy/default-settings package/lean/default-settings/files/zzz-default-settings
+        fi
+        
+        if [ -f "feeds/smpackage/.github/diy/banner" ]; then
+            cp -f feeds/smpackage/.github/diy/banner package/base-files/files/etc/banner
+        fi
+        
+        # 4. 修改 Banner 日期 (保持原逻辑)
         sed -i "s/%D %V, %C/openwrt $(date +'%m.%d') by kenzo/g" package/base-files/files/etc/banner
+        
+        # 5. 切换主题为 Argon (保持原逻辑)
         sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile
+        
+        # 6. 【重要】替代 customize.sh 中关于默认 IP 和主机名的修改
+        # customize.sh 报错是因为它试图修改一个不存在的 config_generate 文件。
+        # 在 Lean 源码中，默认 IP 通常在 package/base-files/files/bin/config_generate 或者通过 .config 控制。
+        # 如果文件存在则修改，不存在则跳过，避免报错。
+        
+        CONFIG_GENERATE_PATH="package/base-files/files/bin/config_generate"
+        if [ -f "$CONFIG_GENERATE_PATH" ]; then
+            # 修改默认 IP 为 192.168.10.1 (可根据需要修改)
+            sed -i 's/192.168.1.1/192.168.10.1/g' $CONFIG_GENERATE_PATH
+            # 修改默认主机名
+            sed -i 's/OpenWrt/OpenWrt-Kenzo/g' $CONFIG_GENERATE_PATH
+            echo "Modified $CONFIG_GENERATE_PATH successfully."
+        else
+            echo "Warning: $CONFIG_GENERATE_PATH not found. Skipping default IP/Hostname modification via sed."
+            # 备选方案：如果 config_generate 不存在，可能需要检查 package/base-files/files/etc/board.d/02_network
+            # 或者直接在 .config 中指定 CONFIG_TARGET_PREINIT_IP 等选项（如果支持）
+        fi
+
+        # 7. 再次更新 feeds 以识别新克隆的 golang 和 smpackage
         ./scripts/feeds update -a 
+        
+        # 8. 修复 v2dat 编译问题 (保持原逻辑)
         sed -i 's#GO_PKG_TARGET_VARS.*# #g' feeds/packages/utils/v2dat/Makefile 
+        
+        # 9. 安装所有 feeds
         ./scripts/feeds install -a
         
-        # 再次确保 .config 存在并执行 defconfig
-        # 如果之前复制了配置文件，这里会基于该配置进行依赖解析
+        # 10. 执行 defconfig
         make defconfig
+        
+        # --- 核心修复部分结束 ---
         
     - name: Download package
       working-directory: ./openwrt
@@ -212,7 +248,6 @@ jobs:
       run: |
         mkdir firmware
         mv -f openwrt/bin/targets/*/*/{*combined*,*sysupgrade*} ./firmware/ 2>/dev/null || true
-        # 将使用的配置文件也打包进去，方便追溯
         cp openwrt/.config ./firmware/${{matrix.target}}_used.config 2>/dev/null || true
         cp openwrt/build_dir/target-*/linux-*/linux-*/.config ./firmware/${{matrix.target}}_kernel.config 2>/dev/null || true
         cd firmware
